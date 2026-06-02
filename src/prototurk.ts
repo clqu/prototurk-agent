@@ -7,7 +7,6 @@ import EventEmitter from "eventemitter3";
 const PROXIES_FILE = path.resolve(process.cwd(), "proxies.json");
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-
 export type Post = {
     id: string;
     category: string;
@@ -254,7 +253,9 @@ export class PrototurkAgent extends EventEmitter {
         }
     }
 
-    async getPostFromId(postId: string): Promise<{ post: Post; ancestors: Post[] } | null> {
+    async getPostFromId(
+        postId: string,
+    ): Promise<{ post: Post; ancestors: Post[] } | null> {
         const postRes = await this.api.get(`/posts/${postId}`);
         return postRes.data || null;
     }
@@ -263,8 +264,9 @@ export class PrototurkAgent extends EventEmitter {
         postId: string,
         content: string,
         parentId?: string | null,
+        images: any[] = [],
     ) {
-        const reqBody: any = { content, images: [] };
+        const reqBody: any = { content, images };
         if (parentId) reqBody.parentId = parentId;
 
         const commentRes = await this.api.post(
@@ -289,12 +291,22 @@ export class PrototurkAgent extends EventEmitter {
         return items.filter((n: any) => !n.readAt && n.read !== true);
     }
 
+    async markNotificationAsRead(id: string, source: string = "user"): Promise<any> {
+        try {
+            const res = await this.api.post("/notifications/read", { id, source });
+            return res.data;
+        } catch (err: any) {
+            console.error("[Hata] markNotificationAsRead:", err.message);
+        }
+    }
+
     async postDirectMessage(
         conversationId: string,
         content: string,
         replyToId?: string | null,
+        images: any[] = [],
     ) {
-        const reqBody: any = { content, images: [] };
+        const reqBody: any = { content, images };
         if (replyToId) reqBody.replyToId = replyToId;
 
         const dmRes = await this.api.post(
@@ -302,6 +314,22 @@ export class PrototurkAgent extends EventEmitter {
             reqBody,
         );
         return dmRes;
+    }
+
+    async uploadImage(buffer: Buffer, filename: string, mimeType: string, kind: string = "post"): Promise<any> {
+        const formData = new FormData();
+        formData.append("kind", kind);
+        
+        const blob = new Blob([buffer], { type: mimeType });
+        formData.append("file", blob, filename);
+
+        const res = await this.api.post("/uploads", formData, {
+            headers: {
+                "Content-Type": "multipart/form-data",
+            },
+        });
+
+        return res.data;
     }
 
     connectWS() {
@@ -328,10 +356,11 @@ export class PrototurkAgent extends EventEmitter {
 
         currentWs.addEventListener("open", () => {
             console.log("[WS] WebSocket bağlantısı kuruldu.");
-            
+
             // 30 saniyede bir ping atarak bağlantıyı hayatta tut
             pingInterval = setInterval(() => {
-                if (currentWs.readyState === 1) { // 1 = OPEN
+                if (currentWs.readyState === 1) {
+                    // 1 = OPEN
                     currentWs.send(JSON.stringify({ type: "ping" }));
                 }
             }, 30000);
@@ -339,7 +368,7 @@ export class PrototurkAgent extends EventEmitter {
 
         currentWs.addEventListener("message", (event: any) => {
             const rawData = event.data.toString();
-            
+
             // Düz metin ping kontrolü
             if (rawData === "ping") {
                 currentWs.send("pong");
@@ -362,18 +391,26 @@ export class PrototurkAgent extends EventEmitter {
 
                         // Kendi mesajımızsa es geç
                         const botUsername = process.env.BOT_USERNAME || "agent";
-                        if (preview.actorName === botUsername) return;
+                        if (
+                            preview.actorName?.toLowerCase() ===
+                            botUsername.toLowerCase()
+                        )
+                            return;
 
                         if (kind === "mention") {
-                            this.emit("mention", preview);
+                            this.emit("mention", data);
                         } else if (kind === "comment_reply") {
-                            this.emit("reply", preview);
+                            this.emit("reply", data);
                         }
                     }
                 } else if (data.type === "dm:message:new") {
                     const message = data.message;
                     const botUsername = process.env.BOT_USERNAME || "agent";
-                    if (message.authorUsername === botUsername) return;
+                    if (
+                        message.authorUsername?.toLowerCase() ===
+                        botUsername.toLowerCase()
+                    )
+                        return;
 
                     this.emit("dm", {
                         conversationId: data.conversationId,
@@ -388,9 +425,11 @@ export class PrototurkAgent extends EventEmitter {
         currentWs.addEventListener("close", () => {
             clearInterval(pingInterval);
             console.log("[WS] WebSocket bağlantısı kapandı.");
-            
+
             if (currentWs.isGhost) {
-                console.log("[WS] Hot-reload eski bağlantısı kapatıldı, yeniden bağlanılmıyor.");
+                console.log(
+                    "[WS] Hot-reload eski bağlantısı kapatıldı, yeniden bağlanılmıyor.",
+                );
                 return;
             }
 

@@ -16,27 +16,34 @@ const generateMessagesFromThread = (
     thread: Post[],
 ): { role: "assistant" | "user"; content: any }[] => {
     return thread.map((post) => {
+        const role =
+            post.author.username?.toLowerCase() ===
+            (process.env.BOT_USERNAME || "agent").toLowerCase()
+                ? "assistant"
+                : "user";
+
         let content: any = post.contentText || "";
         if (post.images && post.images.length > 0) {
-            content = [
-                { type: "text", text: post.contentText || "" },
-                ...post.images.map((img: any) => ({
-                    type: "image_url",
-                    image_url: {
-                        url: img.url,
-                        detail: "auto",
-                    },
-                })),
-            ];
+            if (role === "assistant") {
+                content =
+                    content +
+                    "\n" +
+                    post.images.map((img: any) => img.url).join("\n");
+            } else {
+                content = [
+                    { type: "text", text: content },
+                    ...post.images.map((img: any) => ({
+                        type: "image_url",
+                        image_url: {
+                            url: img.url,
+                            detail: "auto",
+                        },
+                    })),
+                ];
+            }
         }
 
-        return {
-            role:
-                post.author.username === (process.env.BOT_USERNAME || "agent")
-                    ? "assistant"
-                    : "user",
-            content: content,
-        };
+        return { role, content };
     });
 };
 
@@ -119,7 +126,156 @@ const postMessage = async (
     }
 };
 
-const handlePostNotification = async (preview: any) => {
+const generateImageWithOpenRouter = async (
+    prompt: string,
+    historyMessages: any[],
+): Promise<string | null> => {
+    const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+    const imageModel = process.env.OPENROUTER_IMAGE_MODEL;
+
+    if (!openrouterApiKey || !imageModel) return null;
+
+    // DALL-E 3 gibi resim modelleri geçmişteki resimleri kabul etmeyebilir, sadece metinleri alalım.
+    const sanitizedHistory = historyMessages.map((msg) => {
+        if (Array.isArray(msg.content)) {
+            const textContent = msg.content
+                .filter((c: any) => c.type === "text")
+                .map((c: any) => c.text)
+                .join("\n");
+            return { ...msg, content: textContent };
+        }
+        return msg;
+    });
+
+    try {
+        const response = await axios.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            {
+                model: imageModel,
+                messages: [
+                    ...sanitizedHistory,
+                    {
+                        role: "user",
+                        content: `Lütfen şu resmi çiz: ${prompt}`,
+                    },
+                ],
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${openrouterApiKey}`,
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://prototurk.com",
+                    "X-Title": "Prototurk-Agent",
+                },
+            },
+        );
+
+        const msg = response.data.choices?.[0]?.message;
+
+        // OpenRouter return format for images
+        if (msg?.images && msg.images.length > 0) {
+            return msg.images[0].image_url?.url || null;
+        } else if (msg?.content) {
+            // fallback: some models might return url in markdown
+            const match = msg.content.match(/!\[.*?\]\((.*?)\)/);
+            if (match) return match[1];
+        }
+
+        return null;
+    } catch (err: any) {
+        console.error("[Hata] OpenRouter Image API:", err.message);
+        return null;
+    }
+};
+
+const processReply = async (
+    rawReply: string,
+    historyMessages: any[],
+): Promise<{ text: string; images: any[] }> => {
+    const imageRegex = /\[generateImage:(.*?)\]/is;
+    const match: any = rawReply.match(imageRegex);
+    let text = rawReply;
+    let images: any[] = [];
+
+    if (match) {
+        const prompt = match[1].trim();
+        text = rawReply.replace(imageRegex, "").trim();
+
+        let imageUrl: string | null = null;
+
+        if (process.env.OPENROUTER_IMAGE_MODEL) {
+            console.log(
+                `[Resim Çizimi] OpenRouter üzerinden resim üretiliyor: ${process.env.OPENROUTER_IMAGE_MODEL}`,
+            );
+            imageUrl = await generateImageWithOpenRouter(
+                prompt,
+                historyMessages,
+            );
+        }
+
+        if (!imageUrl) {
+            console.log(
+                `[Resim Çizimi] OpenRouter model tanımlı değil veya başarısız, Pollinations'a fallback yapılıyor...`,
+            );
+            const encodedPrompt = encodeURIComponent(prompt);
+            imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`;
+        }
+
+        if (imageUrl) {
+            try {
+                let buffer: Buffer;
+                let mimeType: string = "image/jpeg";
+                let filename: string = "generated.jpg";
+
+                console.log(
+                    `[Resim Çizimi] Resim işleniyor... (${imageUrl.substring(0, 50)}...)`,
+                );
+
+                if (imageUrl.startsWith("data:")) {
+                    const matches: any = imageUrl.match(
+                        /^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/,
+                    );
+                    if (matches && matches.length === 3) {
+                        mimeType = matches[1];
+                        filename = `generated.${mimeType.split("/")[1]}`;
+                        buffer = Buffer.from(matches[2], "base64");
+                    } else {
+                        throw new Error("Geçersiz base64 formatı");
+                    }
+                } else {
+                    const imgRes = await axios.get(imageUrl, {
+                        responseType: "arraybuffer",
+                    });
+                    buffer = Buffer.from(imgRes.data);
+                    mimeType =
+                        (imgRes.headers["content-type"] as string) ||
+                        "image/jpeg";
+                    filename = `generated.${mimeType.split("/")[1] || "jpg"}`;
+                }
+
+                console.log(`[Resim Çizimi] Resim Prototurk'e yükleniyor...`);
+                const uploadedData = await prototurk.uploadImage(
+                    buffer,
+                    filename,
+                    mimeType,
+                );
+                images.push(uploadedData);
+                console.log(
+                    `[Resim Çizimi] Yükleme tamamlandı: ${uploadedData.url}`,
+                );
+            } catch (err: any) {
+                console.error("[Resim Çizimi] Yükleme hatası:", err.message);
+            }
+        }
+    }
+
+    return { text, images };
+};
+
+const handlePostNotification = async (data: any) => {
+    const preview = data.preview || data;
+    const notificationId = data.id;
+
     console.log(
         `[Event] Yeni Bildirim: ${preview.kind} | EntityId: ${preview.entityId}`,
     );
@@ -145,13 +301,22 @@ const handlePostNotification = async (preview: any) => {
         console.log(
             `[Yapay Zeka] OpenAI'a istek atılıyor... (Mesaj Sayısı: ${messages.length})`,
         );
-        const reply = await postMessage(messages, basePost);
+        const rawReply = await postMessage(messages, basePost);
+        const { text: replyText, images } = await processReply(
+            rawReply,
+            messages,
+        );
 
         console.log(
             `[Prototurk] Yanıt gönderiliyor... (Hedef Post Id: ${entityId})`,
         );
-        await prototurk.postComment(entityId, reply);
+        await prototurk.postComment(entityId, replyText, undefined, images);
         console.log(`[Başarılı] Yanıtlandı: ${entityId}`);
+        
+        if (notificationId) {
+            await prototurk.markNotificationAsRead(notificationId, "user");
+            console.log(`[Bildirim] Okundu işaretlendi: ${notificationId}`);
+        }
     } catch (err: any) {
         console.error(
             `[Hata] handlePostNotification sırasında hata:`,
@@ -165,6 +330,9 @@ prototurk.on("mention", handlePostNotification);
 
 prototurk.on("dm", async (payload: any) => {
     const { conversationId, message } = payload;
+
+    const botUsername = (process.env.BOT_USERNAME || "agent").toLowerCase();
+    if (message.authorUsername?.toLowerCase() === botUsername) return;
 
     const dmHistory = await prototurk.getDMConversation(conversationId);
 
@@ -181,31 +349,45 @@ prototurk.on("dm", async (payload: any) => {
     }
 
     const messages = sortedHistory.map((m) => {
+        const role =
+            m.authorUsername?.toLowerCase() ===
+            (process.env.BOT_USERNAME || "agent").toLowerCase()
+                ? "assistant"
+                : "user";
+
         let content: any = m.content || "";
         if (m.images && m.images.length > 0) {
-            content = [
-                { type: "text", text: m.content || "" },
-                ...m.images.map((img: any) => ({
-                    type: "image_url",
-                    image_url: {
-                        url: img.url,
-                        detail: "auto",
-                    },
-                })),
-            ];
+            if (role === "assistant") {
+                content =
+                    content +
+                    "\n" +
+                    m.images.map((img: any) => img.url).join("\n");
+            } else {
+                content = [
+                    { type: "text", text: content },
+                    ...m.images.map((img: any) => ({
+                        type: "image_url",
+                        image_url: {
+                            url: img.url,
+                            detail: "auto",
+                        },
+                    })),
+                ];
+            }
         }
 
-        return {
-            role:
-                m.authorUsername === (process.env.BOT_USERNAME || "agent")
-                    ? "assistant"
-                    : "user",
-            content: content,
-        };
+        return { role, content };
     });
 
-    const reply = await postMessage(messages, null);
-    await prototurk.postDirectMessage(conversationId, reply, message.id);
+    const rawReply = await postMessage(messages, null);
+    const { text: replyText, images } = await processReply(rawReply, messages);
+
+    await prototurk.postDirectMessage(
+        conversationId,
+        replyText,
+        message.id,
+        images,
+    );
 });
 
 if (PROCESS_UNREAD_ON_STARTUP) {
@@ -216,11 +398,14 @@ if (PROCESS_UNREAD_ON_STARTUP) {
             const kind = notif.preview?.kind;
             if (kind === "mention" || kind === "comment_reply") {
                 const botUsername = process.env.BOT_USERNAME || "agent";
-                if (notif.preview?.actorName !== botUsername) {
+                if (
+                    notif.preview?.actorName?.toLowerCase() !==
+                    botUsername.toLowerCase()
+                ) {
                     console.log(
                         `[Startup] Okunmamış bildirim bulundu, yanıtlanıyor... EntityId: ${notif.preview.entityId}`,
                     );
-                    await handlePostNotification(notif.preview);
+                    await handlePostNotification(notif);
                 }
             }
         }
