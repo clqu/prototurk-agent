@@ -60,6 +60,15 @@ const postMessage = async (
                 role: "system",
                 content: await getSystemMessage(),
             },
+            {
+                role: "user",
+                content: "Merhaba, sen kimsin?",
+            },
+            {
+                role: "assistant",
+                content:
+                    "Selam! Ben Prototürk yazılım topluluğunun yapay zeka asistanı @agent. Sana nasıl yardımcı olabilirim?",
+            },
             ...(basePost
                 ? [
                       {
@@ -312,7 +321,7 @@ const handlePostNotification = async (data: any) => {
         );
         await prototurk.postComment(entityId, replyText, undefined, images);
         console.log(`[Başarılı] Yanıtlandı: ${entityId}`);
-        
+
         if (notificationId) {
             await prototurk.markNotificationAsRead(notificationId, "user");
             console.log(`[Bildirim] Okundu işaretlendi: ${notificationId}`);
@@ -338,7 +347,7 @@ prototurk.on("dm", async (payload: any) => {
 
     // DM mesajları API'den yeniden eskiye (descending) gelebilir,
     // bu yüzden eskiden yeniye (ascending) doğru sıralıyoruz.
-    const sortedHistory = dmHistory.sort(
+    let sortedHistory: any = dmHistory.sort(
         (a, b) =>
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
     );
@@ -347,6 +356,57 @@ prototurk.on("dm", async (payload: any) => {
     if (!sortedHistory.find((m) => m.id === message.id)) {
         sortedHistory.push(message);
     }
+
+    const textContent = message.content?.trim().toLowerCase() || "";
+    if (textContent === "/new" || textContent === "/temizle") {
+        await prototurk.postDirectMessage(
+            conversationId,
+            "Görüşme geçmişi sıfırlandı. Yeni bir konuya başlayabiliriz!",
+            message.id,
+            [],
+        );
+        return;
+    } else if (textContent === "/ping") {
+        await prototurk.postDirectMessage(
+            conversationId,
+            "Pong! 🏓 Buralardayım.",
+            message.id,
+            [],
+        );
+        return;
+    } else if (textContent === "/yardim" || textContent === "/help") {
+        const helpText =
+            "Komut Listesi:\n\n" +
+            "`/new` veya `/temizle` : Görüşme geçmişini unutur ve yeni bir sohbet başlatır.\n" +
+            "`/ping` : Botun aktif olup olmadığını kontrol eder.\n" +
+            "`/yardim` veya `/help` : Bu mesajı gösterir.";
+        await prototurk.postDirectMessage(
+            conversationId,
+            helpText,
+            message.id,
+            [],
+        );
+        return;
+    }
+
+    // Geçmişi /new veya /temizle komutuna kadar keselim
+    let lastNewIndex = -1;
+    for (let i = sortedHistory.length - 1; i >= 0; i--) {
+        const c = sortedHistory[i].content?.trim().toLowerCase();
+        if (c === "/new" || c === "/temizle") {
+            lastNewIndex = i;
+            break;
+        }
+    }
+
+    if (lastNewIndex !== -1) {
+        sortedHistory = sortedHistory.slice(lastNewIndex + 1);
+    }
+
+    // Komutları LLM'e göndermemek için filtreleyelim
+    sortedHistory = sortedHistory.filter(
+        (m) => !m.content?.trim().startsWith("/"),
+    );
 
     const messages = sortedHistory.map((m) => {
         const role =
