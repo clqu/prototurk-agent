@@ -1,23 +1,25 @@
 {
-    "name": "prototurk-agent",
+    "name": "prototurk-agent-bot",
     "module": "index.ts",
     "type": "module",
     "private": true,
     "scripts": {
-        "dev": "bun --hot src/",
-        "start": "bun src/"
+        "dev": "bun --watch src/index.ts",
+        "start": "bun run src/"
     },
     "devDependencies": {
-        "@types/bun": "latest"
+        "@types/bun": "latest",
+        "@types/glob": "^9.0.0"
     },
     "peerDependencies": {
         "typescript": "^5"
     },
     "dependencies": {
-        "@openrouter/sdk": "^0.12.79",
-        "axios": "^1.16.1",
+        "axios": "^1.17.0",
         "dotenv": "^17.4.2",
-        "eventemitter3": "^5.0.1",
-        "websocket": "^1.0.35"
+        "elysia": "^1.4.28",
+        "glob": "^13.0.6",
+        "lmdb": "^3.5.5",
+        "prototurk-sdk": "^0.1.0"
     }
 }
