@@ -1,10 +1,11 @@
 import "dotenv";
-import { Client } from "prototurk-sdk";
+import { Client, Command } from "prototurk-sdk";
 import { open } from "lmdb";
 import ping from "./commands/ping";
-import history from "./commands/history";
 import clear from "./commands/clear";
 import { runLLM } from "./llm";
+import screenhot from "./commands/screenhot";
+import help from "./commands/help";
 
 export const db = open("src/database", {
     compression: true,
@@ -12,7 +13,9 @@ export const db = open("src/database", {
 
 export const client = new Client({
     token: process.env.PROTOTURK_TOKEN!,
-    useWebhooks: true,
+    useWebhooks: process.env.NODE_ENV !== "development",
+    autoPoll: process.env.NODE_ENV === "development",
+    devMode: process.env.NODE_ENV === "development",
     getEventSince: async () => {
         return db.get("cursor") ?? null;
     },
@@ -22,8 +25,9 @@ export const client = new Client({
 });
 
 client.commands.register(ping);
-client.commands.register(history);
 client.commands.register(clear);
+client.commands.register(screenhot);
+client.commands.register(help);
 
 client.on("ready", () => {
     console.log(
@@ -86,6 +90,7 @@ client.on("dmMessageCreate", async (payload) => {
 client.on("mention", async (payload) => {
     const author = payload.actor;
     if (author.isBot) return;
+    if (client.commands.isCommand(payload.excerpt!)) return;
     if (author.username === client.user?.username) return;
     if (payload.excerpt === "" || payload.excerpt === "@agent") return;
 
